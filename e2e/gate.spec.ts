@@ -59,6 +59,44 @@ test.describe("access gate", () => {
     expect(health.status()).toBe(200)
   })
 
+  test("gates dynamic segments that look like assets and keeps root metadata images public", async ({ request }) => {
+    for (const path of ["/files/report.png", "/files/icon", "/files/q3.txt", "/files/opengraph-image"]) {
+      const response = await request.get(path, { maxRedirects: 0 })
+      expect(response.status(), path).toBe(307)
+      expect(response.headers().location, path).toContain("/access?next=")
+    }
+    const preview = await request.get("/opengraph-image", { maxRedirects: 0 })
+    expect(preview.status()).toBe(200)
+    expect(preview.headers()["content-type"]).toBe("image/png")
+  })
+
+  test("refuses anonymous server action calls on the gate page", async ({ request }) => {
+    const action = await request.post("/access", {
+      headers: { "Next-Action": "0123456789abcdef0123456789abcdef01234567", "Content-Type": "text/plain;charset=UTF-8" },
+      data: "[]",
+      maxRedirects: 0,
+    })
+    expect(action.status()).toBe(403)
+    const form = await request.post("/access", { form: { $ACTION_ID_0123: "" }, maxRedirects: 0 })
+    expect(form.status()).toBe(403)
+    const allowed = await request.post("/api/health", { maxRedirects: 0 })
+    expect(allowed.status()).toBe(403)
+  })
+
+  test("keeps protected static pages out of shared caches", async ({ request }) => {
+    const signIn = await request.post("/access/verify", { form: { code: E2E_CODE, next: "/" }, maxRedirects: 0 })
+    expect(signIn.status()).toBe(303)
+    const home = await request.get("/", { maxRedirects: 0 })
+    expect(home.status()).toBe(200)
+    expect(await home.text()).toContain("Acme Orbit")
+    const cacheControl = home.headers()["cache-control"] ?? ""
+    expect(cacheControl).toContain("private")
+    expect(cacheControl).toContain("no-store")
+    expect(cacheControl).not.toContain("s-maxage")
+    const gatePage = await request.get("/access", { maxRedirects: 0 })
+    expect(gatePage.headers()["cache-control"]).toContain("no-store")
+  })
+
   test("rejects an open redirect in next", async ({ request }) => {
     const response = await request.post("/access/verify", {
       form: { code: E2E_CODE, next: "//evil.example/steal" },

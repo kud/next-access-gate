@@ -12,8 +12,25 @@ export const DEFAULT_PATHS: GatePaths = {
   logout: "/access/logout",
 }
 
-const METADATA_IMAGE_SEGMENT =
-  /^(?:opengraph-image|twitter-image|icon|apple-icon)\d*(?:-[A-Za-z0-9_]+)?(?:\.[A-Za-z0-9]+)?$/
+const withExtensions = (base: string, extensions: readonly string[]): string[] => [
+  base,
+  ...extensions.map((extension) => `${base}.${extension}`),
+]
+
+export const DEFAULT_METADATA_IMAGES: readonly string[] = Object.freeze([
+  ...withExtensions("/opengraph-image", ["png", "jpg", "jpeg", "gif"]),
+  ...withExtensions("/twitter-image", ["png", "jpg", "jpeg", "gif"]),
+  ...withExtensions("/icon", ["ico", "png", "jpg", "jpeg", "svg"]),
+  ...withExtensions("/apple-icon", ["png", "jpg", "jpeg"]),
+])
+
+export type MetadataImagesOption = boolean | readonly string[]
+
+export const resolveMetadataImages = (option: MetadataImagesOption | undefined): string[] => {
+  if (option === false) return []
+  if (option === undefined || option === true) return [...DEFAULT_METADATA_IMAGES]
+  return option.map(normalisePath)
+}
 
 const stripTrailingSlash = (path: string): string =>
   path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path
@@ -30,18 +47,11 @@ const matchesEntry = (pathname: string, entry: AllowEntry): boolean => {
   return pathname === base || pathname.startsWith(`${base}/`)
 }
 
-export const isMetadataImagePath = (pathname: string): boolean => {
-  const segments = pathname.split("/").filter(Boolean)
-  const last = segments.at(-1)
-  const previous = segments.at(-2)
-  if (last && METADATA_IMAGE_SEGMENT.test(last)) return true
-  return previous !== undefined && METADATA_IMAGE_SEGMENT.test(previous)
-}
-
 export interface PublicPathOptions {
   paths: GatePaths
   allow: readonly AllowEntry[]
-  publicMetadataImages: boolean
+  /** `true` (default) for root-level metadata images, `false` for none, or exact paths. */
+  publicMetadataImages?: MetadataImagesOption
 }
 
 export const isPublicPath = (rawPathname: string, options: PublicPathOptions): boolean => {
@@ -50,7 +60,7 @@ export const isPublicPath = (rawPathname: string, options: PublicPathOptions): b
   if (pathname === "/favicon.ico" || pathname === "/robots.txt") return true
   const { page, verify, logout } = options.paths
   if (pathname === page || pathname === verify || pathname === logout) return true
-  if (options.publicMetadataImages && isMetadataImagePath(pathname)) return true
+  if (resolveMetadataImages(options.publicMetadataImages).includes(pathname)) return true
   return options.allow.some((entry) => matchesEntry(pathname, entry))
 }
 

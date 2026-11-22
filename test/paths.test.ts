@@ -57,13 +57,11 @@ describe("isPublicPath", () => {
     "/robots.txt",
     "/opengraph-image",
     "/opengraph-image.png",
-    "/blog/opengraph-image-1a2b3c",
     "/twitter-image",
     "/icon",
     "/icon.svg",
-    "/icon1.png",
     "/apple-icon.png",
-    "/icon/small",
+    "/opengraph-image/",
     "/og",
     "/og/cover",
     "/api/health",
@@ -84,6 +82,16 @@ describe("isPublicPath", () => {
     "/press",
     "/_nextish",
     "/%5Fnext/static/x.js",
+    "/blog/opengraph-image-1a2b3c",
+    "/blog/opengraph-image",
+    "/icon1.png",
+    "/icon/small",
+    "/icon.txt",
+    "/files/report.png",
+    "/files/icon",
+    "/files/icon.png",
+    "/api/export/q3.txt",
+    "/api/export/twitter-image",
   ])("gates %s", (path) => {
     expect(isPublicPath(path, options)).toBe(false)
   })
@@ -91,6 +99,15 @@ describe("isPublicPath", () => {
   it("can keep metadata images behind the wall", () => {
     expect(isPublicPath("/opengraph-image", { ...options, publicMetadataImages: false })).toBe(false)
     expect(isPublicPath("/icon.png", { ...options, publicMetadataImages: false })).toBe(false)
+  })
+
+  it("takes an explicit list of exact metadata image paths", () => {
+    const custom = { ...options, publicMetadataImages: ["/blog/opengraph-image", "press/icon.png/"] }
+    expect(isPublicPath("/blog/opengraph-image", custom)).toBe(true)
+    expect(isPublicPath("/press/icon.png", custom)).toBe(true)
+    expect(isPublicPath("/blog/opengraph-image/1", custom)).toBe(false)
+    expect(isPublicPath("/opengraph-image", custom)).toBe(false)
+    expect(isPublicPath("/opengraph-image", { paths: DEFAULT_PATHS, allow: [] })).toBe(true)
   })
 
   it("treats an allow entry of / as the home page only", () => {

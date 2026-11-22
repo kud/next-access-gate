@@ -1,14 +1,16 @@
 import { NextResponse, type NextRequest } from "next/server.js"
 import { matchCode, keyId, parseCodes, type CodesInput } from "./codes.js"
-import { cookieNameFor, readCookie, serialiseCookie } from "./cookie.js"
+import { cookieNameFor, readCookie, serialiseCookie, type RequestLike } from "./cookie.js"
 import { deriveHmacKey } from "./crypto.js"
 import {
   DEFAULT_PATHS,
   isPublicPath,
   normalisePath,
+  resolveMetadataImages,
   safeNext,
   type AllowEntry,
   type GatePaths,
+  type MetadataImagesOption,
 } from "./paths.js"
 import { createToken, verifyToken } from "./token.js"
 import { unconfiguredHtml } from "./unconfigured.js"
@@ -26,7 +28,7 @@ export interface AccessGateOptions {
   paths?: Partial<GatePaths>
   caseSensitive?: boolean
   maxAge?: number
-  publicMetadataImages?: boolean
+  publicMetadataImages?: MetadataImagesOption
   failureDelayMs?: number
 }
 
@@ -36,7 +38,7 @@ export interface AccessGate {
   proxy: (request: NextRequest) => Promise<Response>
   verify: (request: Request) => Promise<Response>
   logout: (request: Request) => Promise<Response>
-  isAuthenticated: (request: Request) => Promise<boolean>
+  isAuthenticated: (request: RequestLike) => Promise<boolean>
 }
 
 const DAY_SECONDS = 24 * 60 * 60
@@ -44,6 +46,8 @@ const MIN_SECRET_LENGTH = 32
 const MIN_CODE_LENGTH = 10
 const MAX_CODE_LENGTH = 512
 const NOINDEX = "noindex, nofollow"
+const NO_STORE = "private, no-store"
+const SAFE_METHODS = new Set(["GET", "HEAD"])
 
 const warned = new Set<string>()
 const warnOnce = (message: string): void => {
@@ -69,7 +73,7 @@ const resolveStatus = (
 }
 
 const protectHeaders = (headers: Headers): Headers => {
-  headers.set("Cache-Control", "no-store")
+  headers.set("Cache-Control", NO_STORE)
   headers.set("X-Robots-Tag", NOINDEX)
   return headers
 }
@@ -127,7 +131,7 @@ export const createAccessGate = (options: AccessGateOptions): AccessGate => {
   }
   const allow = options.allow ?? []
   const maxAge = Math.max(60, Math.floor(options.maxAge ?? 30 * DAY_SECONDS))
-  const publicMetadataImages = options.publicMetadataImages ?? true
+  const publicMetadataImages = resolveMetadataImages(options.publicMetadataImages)
   const failureDelayMs = options.failureDelayMs ?? 400
   const secret = options.secret?.trim() || undefined
   const status = resolveStatus(codes, options)
@@ -155,7 +159,7 @@ export const createAccessGate = (options: AccessGateOptions): AccessGate => {
     return keyMaterial
   }
 
-  const isAuthenticated = async (request: Request): Promise<boolean> => {
+  const isAuthenticated = async (request: RequestLike): Promise<boolean> => {
     if (status !== "active") return status === "open" || status === "disabled"
     const { key, kids } = await material()
     const token = readCookie(request, cookieNameFor(request))
@@ -177,21 +181,47 @@ export const createAccessGate = (options: AccessGateOptions): AccessGate => {
     return new Response(unconfiguredHtml, { status: 503, headers })
   }
 
+  const forbidden = (request: Request): Response => {
+    const pathname = new URL(request.url).pathname
+    if (isApiPath(pathname) || request.headers.get("accept")?.includes("application/json")) {
+      return json({ error: "forbidden" }, 403)
+    }
+    const headers = protectHeaders(new Headers({ "Content-Type": "text/plain; charset=utf-8" }))
+    return new Response("Forbidden", { status: 403, headers })
+  }
+
+  /**
+   * Paths that skip the cookie check are for reading only. A server action is a
+   * POST to whatever page imports it, carrying its id either in a `Next-Action`
+   * header or, without JavaScript, in the form body; any page reachable without
+   * a cookie (the gate page above all, since it shares the root layout) would
+   * otherwise run it anonymously. So anonymous requests to those paths must be
+   * GET or HEAD without `Next-Action`, apart from the gate's own two POSTs.
+   */
+  const runsServerCode = (request: NextRequest, path: string, internal: boolean): boolean => {
+    if (request.headers.has("next-action")) return true
+    if (internal || SAFE_METHODS.has(request.method)) return false
+    return !(request.method === "POST" && (path === paths.verify || path === paths.logout))
+  }
+
   const proxy = async (request: NextRequest): Promise<Response> => {
     if (status === "disabled" || status === "open") return NextResponse.next()
     const { pathname, search } = request.nextUrl
-    if (pathname.startsWith("/_next/")) return NextResponse.next()
-    if (status === "unconfigured") return unconfigured(request)
+    const internal = pathname.startsWith("/_next/")
+    if (status === "unconfigured") return internal ? NextResponse.next() : unconfigured(request)
 
-    const publicPath = isPublicPath(pathname, { paths, allow, publicMetadataImages })
-    const gatePath = pathname === paths.page || pathname === paths.verify || pathname === paths.logout
-    if (gatePath) {
-      return NextResponse.next({ headers: protectHeaders(new Headers()) })
+    const path = normalisePath(pathname)
+    const gatePath = path === paths.page || path === paths.verify || path === paths.logout
+    const publicPath = internal || gatePath || isPublicPath(path, { paths, allow, publicMetadataImages })
+    if (publicPath) {
+      if (runsServerCode(request, path, internal) && !(await isAuthenticated(request))) {
+        return forbidden(request)
+      }
+      return gatePath ? NextResponse.next({ headers: protectHeaders(new Headers()) }) : NextResponse.next()
     }
-    if (publicPath) return NextResponse.next()
 
     if (await isAuthenticated(request)) {
-      return NextResponse.next({ headers: { "X-Robots-Tag": NOINDEX } })
+      return NextResponse.next({ headers: protectHeaders(new Headers()) })
     }
     if (isApiPath(pathname)) return json({ error: "unauthorised" }, 401)
     return redirect(pageUrl(request, { next: `${pathname}${search}` }), 307)

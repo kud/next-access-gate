@@ -58,7 +58,7 @@ describe("proxy", () => {
     const location = new URL(response.headers.get("location")!)
     expect(location.pathname).toBe("/access")
     expect(location.searchParams.get("next")).toBe("/deck?slide=3")
-    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow")
   })
 
@@ -80,7 +80,7 @@ describe("proxy", () => {
     const response = await gateWith().proxy(get("/access"))
     expect(isNext(response)).toBe(true)
     expect(response.headers.get("x-robots-tag")).toBe("noindex, nofollow")
-    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
   })
 
   it("rejects a forged cookie", async () => {
@@ -103,7 +103,7 @@ describe("verify and cookie round-trip", () => {
     expect(cookie).toContain("Secure")
     expect(cookie).toContain(`Max-Age=${30 * 24 * 60 * 60}`)
     expect(cookie).not.toContain("Domain")
-    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
 
     const through = await gate.proxy(get("/deck", { cookie: cookiePair(response) }))
     expect(isNext(through)).toBe(true)
@@ -181,7 +181,7 @@ describe("verify and cookie round-trip", () => {
     expect(response.status).toBe(303)
     expect(new URL(response.headers.get("location")!).pathname).toBe("/access")
     expect(response.headers.get("set-cookie")).toMatch(/^__Host-access-gate=; .*Max-Age=0/)
-    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
   })
 })
 
@@ -254,5 +254,90 @@ describe("when unset", () => {
     expect(isNext(await gate.proxy(get("/")))).toBe(true)
     vi.stubEnv("VERCEL_ENV", "production")
     expect(gateWith({ enabledIn: ["production"] }).status).toBe("active")
+  })
+})
+
+describe("security review", () => {
+  const request = (
+    path: string,
+    init: { method?: string; headers?: Record<string, string>; body?: string } = {},
+  ) => new NextRequest(`${ORIGIN}${path}`, init)
+
+  const signIn = async (gate = gateWith()) => cookiePair(await gate.verify(postForm({ code: CODE })))
+
+  it.each(["/files/report.png", "/files/icon", "/api/export/q3.txt", "/blog/opengraph-image", "/icon/small", "/a/apple-icon.png"])(
+    "does not treat the asset-shaped path %s as public",
+    async (path) => {
+      const response = await gateWith().proxy(request(path))
+      expect(isNext(response)).toBe(false)
+      expect([307, 401]).toContain(response.status)
+    },
+  )
+
+  it("keeps root-level metadata images public by exact path only", async () => {
+    const gate = gateWith()
+    for (const path of ["/opengraph-image", "/twitter-image.png", "/icon.svg", "/apple-icon.png"]) {
+      expect(isNext(await gate.proxy(request(path))), path).toBe(true)
+    }
+    const custom = gateWith({ publicMetadataImages: ["/press/opengraph-image"] })
+    expect(isNext(await custom.proxy(request("/press/opengraph-image")))).toBe(true)
+    expect(isNext(await custom.proxy(request("/opengraph-image")))).toBe(false)
+  })
+
+  it.each([
+    ["POST", "/access", { "next-action": "7f00", "content-type": "text/plain;charset=UTF-8" }],
+    ["POST", "/access", { "content-type": "application/x-www-form-urlencoded" }],
+    ["POST", "/access", { "content-type": "multipart/form-data; boundary=x" }],
+    ["GET", "/access", { "next-action": "7f00" }],
+    ["POST", "/access/verify", { "next-action": "7f00", "content-type": "text/plain;charset=UTF-8" }],
+    ["POST", "/access/logout", { "next-action": "7f00" }],
+    ["POST", "/og", { "next-action": "7f00" }],
+    ["PUT", "/og", {}],
+    ["DELETE", "/api/health", {}],
+    ["POST", "/opengraph-image", {}],
+    ["POST", "/_next/static/a.js", { "next-action": "7f00" }],
+  ])("refuses an anonymous %s %s that could run server code", async (method, path, headers) => {
+    const response = await gateWith().proxy(request(path, { method, headers }))
+    expect(isNext(response)).toBe(false)
+    expect(response.status).toBe(403)
+    expect(response.headers.get("cache-control")).toBe("private, no-store")
+  })
+
+  it("still lets the gate's own posts and safe reads through", async () => {
+    const gate = gateWith()
+    const form = { "content-type": "application/x-www-form-urlencoded" }
+    expect(isNext(await gate.proxy(request("/access/verify", { method: "POST", headers: form })))).toBe(true)
+    expect(isNext(await gate.proxy(request("/access/logout", { method: "POST" })))).toBe(true)
+    expect(isNext(await gate.proxy(request("/access/logout")))).toBe(true)
+    expect(isNext(await gate.proxy(request("/access", { method: "HEAD" })))).toBe(true)
+    expect(isNext(await gate.proxy(request("/api/health")))).toBe(true)
+  })
+
+  it("lets an authenticated visitor call server actions anywhere", async () => {
+    const gate = gateWith()
+    const cookie = await signIn(gate)
+    for (const path of ["/access", "/og", "/deck"]) {
+      const response = await gate.proxy(request(path, { method: "POST", headers: { cookie, "next-action": "7f00" } }))
+      expect(isNext(response), path).toBe(true)
+    }
+  })
+
+  it("marks every protected response it lets through private and no-store", async () => {
+    const gate = gateWith()
+    const cookie = await signIn(gate)
+    for (const path of ["/", "/deck", "/api/secret"]) {
+      const response = await gate.proxy(request(path, { headers: { cookie } }))
+      expect(isNext(response), path).toBe(true)
+      expect(response.headers.get("cache-control"), path).toBe("private, no-store")
+    }
+    expect((await gate.proxy(request("/access"))).headers.get("cache-control")).toBe("private, no-store")
+  })
+
+  it("checks a session from plain headers, as a server action sees them", async () => {
+    const gate = gateWith()
+    const cookie = await signIn(gate)
+    expect(await gate.isAuthenticated(new Headers({ cookie, "x-forwarded-proto": "https" }))).toBe(true)
+    expect(await gate.isAuthenticated(new Headers({ "x-forwarded-proto": "https" }))).toBe(false)
+    expect(await gate.isAuthenticated(new Headers({ cookie: "__Host-access-gate=v1.AAAAAAAAAAA.9999999999.forged" }))).toBe(false)
   })
 })
