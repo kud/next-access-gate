@@ -47,9 +47,12 @@
     "README.md",
     "LICENSE"
   ],
+  "workspaces": [
+    "example"
+  ],
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p example/tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json && npm run build && npm run typecheck -w example",
     "test": "vitest run",
     "test:watch": "vitest",
     "example:build": "npm run build && npm run build -w example",
