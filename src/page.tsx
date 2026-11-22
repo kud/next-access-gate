@@ -28,10 +28,10 @@ const first = (value: string | string[] | undefined): string | undefined =>
   Array.isArray(value) ? value[0] : value
 
 const LockMark = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-    <rect x="4.5" y="10.5" width="15" height="10" rx="2.5" />
-    <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
-    <path d="M12 14.5v2" />
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="4.75" y="10.25" width="14.5" height="10" rx="2.75" />
+    <path d="M8.25 10.25V7.75a3.75 3.75 0 0 1 7.5 0v2.5" />
+    <path d="M12 14.25v2" />
   </svg>
 )
 
@@ -86,14 +86,14 @@ export const AccessGatePage = async ({
             aria-invalid={hasError ? true : undefined}
             aria-describedby={hasError ? "nag-error" : undefined}
           />
-          <button className="nag-button" type="submit">
-            {submitLabel ?? text.submitLabel}
-          </button>
           {hasError ? (
             <p className="nag-error" id="nag-error" role="alert">
               {errorText ?? text.errorText}
             </p>
           ) : null}
+          <button className="nag-button" type="submit">
+            {submitLabel ?? text.submitLabel}
+          </button>
         </form>
       </main>
     </div>
