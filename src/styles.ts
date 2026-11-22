@@ -38,7 +38,7 @@ export const themeToStyle = (theme: Partial<AccessGateTheme> | undefined): Recor
   return style
 }
 
-export const css = `
+export const css: string = `
 :where(.nag-root){
   --nag-bg:#f7f6f3;
   --nag-fg:#1d1c1a;
