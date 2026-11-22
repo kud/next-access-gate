@@ -13,7 +13,8 @@ A password gate for Next.js 16 demos and presentations deployed on Vercel: a `pr
 - Several codes at once (rotation, one code per audience); removing a code signs out exactly the people who used it.
 - Signed, expiring `HttpOnly` cookie built on Web Crypto; no runtime dependencies.
 - Fails closed when no code is configured, outside local development.
-- `noindex` and `no-store` everywhere the gate answers.
+- `noindex` and `private, no-store` on the gate and on every protected response, so no shared cache keeps a copy.
+- Anonymous requests to public paths are read-only: server actions cannot be triggered from the gate page.
 
 ## Install
 
@@ -47,13 +48,13 @@ import { gate } from "./access-gate"
 export const proxy = gate.proxy
 
 export const config = {
-  matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|robots.txt|sitemap.xml|manifest.webmanifest|.*\\.(?:png|jpg|jpeg|gif|svg|webp|avif|ico|txt|woff2?)$).*)",
-  ],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
 }
 ```
 
-Next.js reads `matcher` statically at build time, so it has to be a literal in your own `proxy.ts`; the package cannot ship it. The matcher only keeps static assets away from the proxy. Every other exception (the gate's own routes, metadata images, your `allow` list) is decided at runtime by `gate.proxy`, which is the one place an allowlist lives.
+Next.js reads `matcher` statically at build time, so it has to be a literal in your own `proxy.ts`; the package cannot ship it. Keep it this narrow. It only skips the build output (`_next/static`), the image optimiser (`_next/image`, whose internal fetches still go through the proxy) and the favicon. Every other exception (the gate's own routes, metadata images, your `allow` list) is decided at runtime by `gate.proxy`, which is the one place an allowlist lives.
+
+Excluding file extensions in the matcher, as many examples do, is unsafe here: a dynamic segment such as `/files/[name]` or `/api/export/[id]` would serve `/files/report.png` or `/api/export/q3.txt` to anyone, because the extension is only part of a URL, not proof of a static file. The cost of the narrow matcher is that files in `public/` sit behind the gate too, which is usually what a private demo wants. Assets the gate page itself shows, such as a logo, go in a folder listed in `allow` (for example `allow: ["/brand"]` and `public/brand/logo.svg`). `next/image` cannot optimise a gated file, since the optimiser fetches it without the visitor's cookie: mark such images `unoptimized`, or keep them in an allowed folder.
 
 ```ts
 // app/access/verify/route.ts
@@ -128,11 +129,28 @@ An explicit value wins over the default in every environment.
 
 Always public: `/_next/…`, the three gate routes, `/favicon.ico` and `/robots.txt`.
 
-Public by default: metadata images (`opengraph-image*`, `twitter-image*`, `icon*`, `apple-icon*` at any depth), so link previews still render when you paste the URL into a chat. Set `publicMetadataImages: false` if the preview image itself is confidential.
+Public by default: the root-level metadata images, by exact path, so link previews still render when you paste the URL into a chat. That is `/opengraph-image` and `/twitter-image` (bare or with `.png`, `.jpg`, `.jpeg` or `.gif`), `/icon` (bare or with `.ico`, `.png`, `.jpg`, `.jpeg` or `.svg`) and `/apple-icon` (bare or with `.png`, `.jpg` or `.jpeg`); the full list is exported as `DEFAULT_METADATA_IMAGES`. Nested ones such as `/blog/opengraph-image` stay behind the wall unless you list them: `publicMetadataImages` takes an array of exact paths instead (`[...DEFAULT_METADATA_IMAGES, "/blog/opengraph-image"]`), or `false` if the preview image itself is confidential. Names are never matched by pattern, so a page or route that merely ends in `icon` or `.png` is not exposed.
 
 `allow` adds your own entries. A string matches that path and everything below it (`"/og"` matches `/og` and `/og/cover`, not `/ogre`); `"/"` matches the home page only; a `RegExp` is tested against the pathname.
 
-Everything else needs a valid cookie. Without one, `/api/*` gets `401` JSON and pages get a `307` to the gate with `?next=` set to the original path and query. After a valid cookie, responses carry `X-Robots-Tag: noindex, nofollow`.
+Everything else needs a valid cookie. Without one, `/api/*` gets `401` JSON and pages get a `307` to the gate with `?next=` set to the original path and query. After a valid cookie, responses carry `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store`, which replaces the `s-maxage` Next.js would otherwise send for a static page; a CDN in front of the app therefore never caches protected content for the next visitor.
+
+Public paths are for reading. Without a valid cookie, any request to them that could run server code is refused with `403`: a `Next-Action` header, or any method other than `GET` and `HEAD`, apart from the gate's own `POST` to verify and logout. This matters because a server action is a `POST` to whichever page uses it, and the gate page shares your root layout, so an action referenced there would otherwise be callable by anyone. If you need an anonymous `POST` endpoint, such as a webhook, exclude its path in the matcher so that the proxy never sees it, and authenticate it on its own terms.
+
+## Server actions
+
+The proxy is a first line, not the only one. Next.js recommends checking authorisation inside each server action, because a matcher change or a refactor can move an action out of the proxy's reach without anyone noticing. `isAuthenticated` accepts the headers a server action receives:
+
+```ts
+"use server"
+import { headers } from "next/headers"
+import { gate } from "./access-gate"
+
+export const saveNote = async (note: string) => {
+  if (!(await gate.isAuthenticated(await headers()))) throw new Error("unauthorised")
+  // …
+}
+```
 
 ## How it works
 
@@ -140,7 +158,7 @@ Everything else needs a valid cookie. Without one, `/api/*` gets `401` JSON and 
 - **Codes** are compared by HMAC-ing the submitted code and every configured code with the key, then comparing digests in constant time, always across the whole list.
 - **The cookie** is `v1.<kid>.<exp>.<sig>`: `kid` is the first 8 bytes of `HMAC(key, "kid:" + code)`, `exp` is a Unix timestamp (30 days by default, fixed, not sliding), and `sig` is `HMAC-SHA-256(key, "v1.<kid>.<exp>")`, base64url-encoded. It is checked for version, signature, expiry and a `kid` that belongs to a current code.
 - **Cookie attributes**: `__Host-access-gate` with `Secure; Path=/` and no `Domain` over HTTPS; `access-gate` over plain HTTP such as `http://localhost`. Always `HttpOnly; SameSite=Lax; Max-Age=<maxAge>`.
-- **Headers**: the gate page, verify, logout and every redirect send `Cache-Control: no-store` and `X-Robots-Tag: noindex, nofollow`; the page also renders a robots `meta` tag.
+- **Headers**: the gate page, verify, logout, every redirect and every protected response the proxy lets through send `Cache-Control: private, no-store` and `X-Robots-Tag: noindex, nofollow`; the page also renders a robots `meta` tag.
 
 ## Customisation
 
@@ -155,7 +173,7 @@ There are three levels, from least to most work.
   locale="fr"
   title="Démo Acme"
   description="Saisissez le code reçu avec l’invitation."
-  logo={<img src="/logo.svg" alt="" />}
+  logo={<img src="/brand/logo.svg" alt="" />}
   copy={{ submitLabel: "Entrer" }}
   theme={{ accent: "#0b6e4f", radius: "6px", font: "Inter, sans-serif" }}
 />
@@ -212,10 +230,10 @@ Any page that posts `code` and `next` to the verify route works, either as `appl
 | `paths`                | `/access`, `/access/verify`, `/access/logout`          | Keep them in sync with your route files.                    |
 | `caseSensitive`        | `false`                                                |                                                             |
 | `maxAge`               | 30 days                                                | Seconds.                                                    |
-| `publicMetadataImages` | `true`                                                 |                                                             |
+| `publicMetadataImages` | `true`                                                 | `true`, `false` or an array of exact paths. See above.      |
 | `failureDelayMs`       | `400`                                                  | Delay before answering a wrong code.                        |
 
-The returned gate exposes `proxy`, `verify`, `logout`, `isAuthenticated(request)`, `paths` and `status` (`"active"`, `"open"`, `"unconfigured"` or `"disabled"`).
+The returned gate exposes `proxy`, `verify`, `logout`, `isAuthenticated(requestOrHeaders)`, `paths` and `status` (`"active"`, `"open"`, `"unconfigured"` or `"disabled"`).
 
 ## Not covered
 
